@@ -36,6 +36,7 @@
         "svelte": "^5.0.0"
     },
     "devDependencies": {
+        "@radroots/dev": "*",
         "@sveltejs/adapter-auto": "^4.0.0",
         "@sveltejs/kit": "^2.22.0",
         "@sveltejs/package": "^2.0.0",
@@ -47,5 +48,13 @@
         "typescript": "5.8.3",
         "vite": "7.0.6"
     },
-    "dependencies": { }
+    "dependencies": {
+        "@radroots/apps-lib": "*",
+        "@radroots/utils-nostr": "*",
+        "@radroots/utils": "*",
+        "@radroots/core-bindings": "*",
+        "@radroots/events-bindings": "*",
+        "@radroots/events-indexed-bindings": "*",
+        "@radroots/trade-bindings": "*"
+    }
 }
