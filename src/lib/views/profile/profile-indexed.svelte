@@ -19,9 +19,13 @@
         type NDKUserProfile,
     } from "@nostr-dev-kit/ndk";
     import { Glyph, ndk } from "@radroots/apps-lib";
+    import type { RadrootsCoreQuantityPrice } from "@radroots/core-bindings";
     import type {
         RadrootsListing,
+        RadrootsListingEventMetadata,
+        RadrootsListingQuantity,
         RadrootsProfile,
+        RadrootsProfileEventMetadata,
     } from "@radroots/events-bindings";
     import {
         on_ndk_event,
@@ -34,38 +38,57 @@
 
     let trade: TradeFlowService | null = $state(null);
 
-    const listings_mgr = create_radroots_listing_manager(
-        ("listings" in basis.indexed.events
+    const listings_mgr = create_radroots_listing_manager();
+    const profiles_mgr = create_radroots_profile_manager();
+
+    function to_indexed_listing_payload_from_metadata(
+        m: RadrootsListingEventMetadata,
+    ): IndexedEventsStorePayload<RadrootsListing> {
+        return {
+            id: m.id,
+            kind: 30402,
+            author: m.author,
+            published_at: m.published_at ?? 0,
+            data: m.listing,
+            source: "indexed",
+        };
+    }
+
+    function to_indexed_profile_payload_from_metadata(
+        m: RadrootsProfileEventMetadata,
+    ): IndexedEventsStorePayload<RadrootsProfile> {
+        return {
+            id: m.id,
+            kind: 0,
+            author: m.author,
+            published_at: m.published_at ?? 0,
+            data: m.profile,
+            source: "indexed",
+        };
+    }
+
+    function current_listings_meta(): RadrootsListingEventMetadata[] {
+        return "listings" in basis.indexed.events
             ? basis.indexed.events.listings
-            : []) as RadrootsListingNostrEvent[],
-    );
+            : [];
+    }
 
-    const profiles_mgr = create_radroots_profile_manager(
-        ("profile" in basis.indexed.events
-            ? basis.indexed.events.profile
-            : undefined) as RadrootsProfileNostrEvent | undefined,
-    );
-
-    const initial_indexed_listings: RadrootsListingNostrEvent[] = (
-        "listings" in basis.indexed.events ? basis.indexed.events.listings : []
-    ) as RadrootsListingNostrEvent[];
-
-    const initial_indexed_profile_row: RadrootsProfileNostrEvent | undefined = (
-        "profile" in basis.indexed.events
-            ? basis.indexed.events.profile
-            : undefined
-    ) as RadrootsProfileNostrEvent | undefined;
+    function current_profile_meta(): RadrootsProfileEventMetadata {
+        return basis.indexed.events.profile;
+    }
 
     let listings_buffer = $state<IndexedEventsStorePayload<RadrootsListing>[]>(
-        initial_indexed_listings
-            .filter((r) => r?.listing?.d_tag)
-            .map(listings_mgr.to_indexed_payload),
+        current_listings_meta()
+            .filter((r) => r.listing && r.listing.d_tag)
+            .map(to_indexed_listing_payload_from_metadata),
     );
 
     let profile_buffer =
         $state<IndexedEventsStorePayload<RadrootsProfile> | null>(
-            initial_indexed_profile_row
-                ? profiles_mgr.to_indexed_payload(initial_indexed_profile_row)
+            current_profile_meta()
+                ? to_indexed_profile_payload_from_metadata(
+                      current_profile_meta(),
+                  )
                 : null,
         );
 
@@ -82,42 +105,26 @@
     let last_pk = $state(basis.indexed.public_key);
     $effect(() => {
         if (basis.indexed.public_key !== last_pk) {
-            const new_indexed_listings: RadrootsListingNostrEvent[] = (
-                "listings" in basis.indexed.events
-                    ? basis.indexed.events.listings
-                    : []
-            ) as RadrootsListingNostrEvent[];
+            const new_listings_meta = current_listings_meta();
+            const new_profile_meta = current_profile_meta();
 
-            const new_indexed_profile_row:
-                | RadrootsProfileNostrEvent
-                | undefined = (
-                "profile" in basis.indexed.events
-                    ? basis.indexed.events.profile
-                    : undefined
-            ) as RadrootsProfileNostrEvent | undefined;
+            listings_buffer = new_listings_meta
+                .filter((r) => r.listing && r.listing.d_tag)
+                .map(to_indexed_listing_payload_from_metadata);
 
-            listings_buffer = new_indexed_listings
-                .filter((r) => r?.listing?.d_tag)
-                .map(listings_mgr.to_indexed_payload);
-
-            profile_buffer = new_indexed_profile_row
-                ? profiles_mgr.to_indexed_payload(new_indexed_profile_row)
+            profile_buffer = new_profile_meta
+                ? to_indexed_profile_payload_from_metadata(new_profile_meta)
                 : null;
 
             have_live_listings = false;
             have_live_profiles = false;
 
-            listings_mgr.init_from_indexed(new_indexed_listings);
-            profiles_mgr.init_from_indexed(new_indexed_profile_row);
-
-            // drive the trade service to only follow the new author
             trade?.set_filter_authors([basis.indexed.public_key]);
 
             last_pk = basis.indexed.public_key;
         }
     });
 
-    // Profile + Listings (non-trade) live updates
     const sub = $ndk.subscribe(
         {
             kinds: [NDKKind.Metadata, NDKKind.Classified],
@@ -128,10 +135,14 @@
             onEvent: (event: NDKEvent) => {
                 const parsed = on_ndk_event(event);
                 if (parsed && "listing" in parsed) {
-                    listings_mgr.on_parsed_event(parsed);
+                    listings_mgr.on_parsed_event(
+                        parsed as RadrootsListingNostrEvent,
+                    );
                     if (!have_live_listings) have_live_listings = true;
                 } else if (parsed && "profile" in parsed) {
-                    profiles_mgr.on_parsed_event(parsed);
+                    profiles_mgr.on_parsed_event(
+                        parsed as RadrootsProfileNostrEvent,
+                    );
                     if (!have_live_profiles) have_live_profiles = true;
                 }
             },
@@ -139,21 +150,14 @@
     );
 
     onMount(async () => {
-        // Instantiate the TradeFlowService (it manages its own subscription internally)
         trade = create_trade_flow_service({
             ndk: $ndk,
             ndk_user_store: () => {
-                // Use the active signer’s user. Fail fast if missing.
                 const u = $ndk.activeUser;
                 if (!u) throw new Error("No active NDK user/signer found.");
                 return u;
             },
-            // Optional: you can also pass authors/kinds here up front
-            // authors: [basis.indexed.public_key],
-            // kinds: [...defaults...],
         });
-
-        // Narrow to this profile’s pubkey (seller) — you can change this at runtime
         trade.set_filter_authors([basis.indexed.public_key]);
     });
 
@@ -178,6 +182,49 @@
             basis.indexed.events.profile.profile.name
         } (@${basis.indexed.events.profile.profile.name}) ${head_title_suffix}`,
     );
+
+    function fmtQty(q: RadrootsListingQuantity): string {
+        const v = q && q.value ? q.value : undefined;
+        const amt = v && v.amount ? v.amount : "";
+        const unit = v && v.unit ? v.unit : "";
+        const lab = v && v.label ? v.label : q && q.label ? q.label : "";
+        const pieces = [amt, unit, lab].filter((s) => s && `${s}`.length > 0);
+        return pieces.join(" ");
+    }
+
+    function fmtPrice(p: RadrootsCoreQuantityPrice): string {
+        const a = p && p.amount ? p.amount : undefined;
+        const q = p && p.quantity ? p.quantity : undefined;
+        const price = a && a.amount ? a.amount : "";
+        const cur = a && a.currency ? a.currency : "";
+        const qamt = q && q.amount ? q.amount : "";
+        const qun = q && q.unit ? q.unit : "";
+        const left = [price, cur]
+            .filter((s) => s && `${s}`.length > 0)
+            .join(" ");
+        const right = [qamt, qun]
+            .filter((s) => s && `${s}`.length > 0)
+            .join(" ");
+        return right ? `${left} per ${right}` : left;
+    }
+
+    function commentsFor(listingId: string) {
+        if (!("listings" in basis.indexed.events)) return [];
+        if (!("listing_comments" in basis.indexed.events)) return [];
+        const key = listingId.toLowerCase();
+        const m = basis.indexed.events.listing_comments;
+        return m && m[key] ? m[key] : [];
+    }
+
+    function toDate(ts?: number): string {
+        if (!ts) return "";
+        try {
+            const d = new Date(ts * 1000);
+            return d.toLocaleDateString();
+        } catch {
+            return "";
+        }
+    }
 </script>
 
 <svelte:head>
@@ -230,95 +277,154 @@
                 </LayoutColumnHeadingDisplaySimple>
             {/snippet}
             {#snippet subheading()}
-                <p class={`font-rsfd font-[600] text-sm text-black_panther`}>
+                <p class={`font-sans font-[400] text-sm text-black_panther`}>
                     {basis.indexed.events.profile.profile.about}
                 </p>
             {/snippet}
         </LayoutColumnHeading>
         <LayoutColumnHeadingViewButtons />
     </LayoutColumnEntry>
+
     {#if "listings" in basis.indexed.events}
         <LayoutColumnEntry basis={{ classes: `gap-4` }}>
             {#each basis.indexed.events.listings as ev (ev.id)}
-                <div
-                    class={`relative flex flex-col w-full justify-center items-center`}
-                >
-                    <div
-                        class={`flex flex-col h-[10rem] w-full justify-center items-center bg-white`}
-                    >
-                        <div
-                            class={`flex flex-row w-full justify-center items-center`}
-                        >
+                <div class={`relative flex w-full flex-col`}>
+                    <div class={`flex w-full flex-col gap-2 p-4`}>
+                        <div class={`flex w-full flex-row justify-between`}>
                             <p
-                                class={`font-sans font-[400] text-sm text-black_panther`}
+                                class={`font-sans text-base font-[500] text-black_panther`}
                             >
                                 {ev.listing.product.title}
                             </p>
+                            <p
+                                class={`font-sans text-xs font-[500] text-cloak_grey`}
+                            >
+                                {toDate(ev.published_at)}
+                            </p>
                         </div>
+                        <p
+                            class={`font-sans text-sm font-[400] text-black_panther/80`}
+                        >
+                            {ev.listing.product.summary}
+                        </p>
+                        <div class={`flex w-full flex-wrap gap-2 pt-1`}>
+                            <span
+                                class={`rounded-sm bg-ly1 px-2 py-0.5 text-xs font-[600] text-black_panther/90`}
+                            >
+                                {ev.listing.product.category}
+                            </span>
+                            {#if ev.listing.product.process}
+                                <span
+                                    class={`rounded-sm bg-ly1 px-2 py-0.5 text-xs font-[600] text-black_panther/90`}
+                                >
+                                    {ev.listing.product.process}
+                                </span>
+                            {/if}
+                            {#if ev.listing.product.year}
+                                <span
+                                    class={`rounded-sm bg-ly1 px-2 py-0.5 text-xs font-[600] text-black_panther/90`}
+                                >
+                                    {ev.listing.product.year}
+                                </span>
+                            {/if}
+                            {#if ev.listing.product.lot}
+                                <span
+                                    class={`rounded-sm bg-ly1 px-2 py-0.5 text-xs font-[600] text-black_panther/90`}
+                                >
+                                    {ev.listing.product.lot}
+                                </span>
+                            {/if}
+                        </div>
+                        <div class={`flex w-full flex-row gap-4 pt-2`}>
+                            <div class={`flex flex-col`}>
+                                <p
+                                    class={`font-sans text-xs font-[700] text-black_panther/70`}
+                                >
+                                    Quantities
+                                </p>
+                                <p
+                                    class={`font-sans text-sm text-black_panther/90`}
+                                >
+                                    {ev.listing.quantities
+                                        .map((q) => fmtQty(q))
+                                        .filter((s) => s.length > 0)
+                                        .join(", ")}
+                                </p>
+                            </div>
+                            <div class={`flex flex-col`}>
+                                <p
+                                    class={`font-sans text-xs font-[700] text-black_panther/70`}
+                                >
+                                    Prices
+                                </p>
+                                <p
+                                    class={`font-sans text-sm text-black_panther/90`}
+                                >
+                                    {ev.listing.prices
+                                        .map((p) => fmtPrice(p))
+                                        .filter((s) => s.length > 0)
+                                        .join(" · ")}
+                                </p>
+                            </div>
+                        </div>
+                        <div class={`flex w-full flex-row gap-2 pt-2`}>
+                            <p
+                                class={`font-sans text-xs font-[700] text-black_panther/70`}
+                            >
+                                Location
+                            </p>
+                            <p
+                                class={`font-sans text-sm text-black_panther/90`}
+                            >
+                                {#if ev.listing.location}
+                                    {ev.listing.location.primary}
+                                    {ev.listing.location.city
+                                        ? `, ${ev.listing.location.city}`
+                                        : ""}
+                                    {ev.listing.location.region
+                                        ? `, ${ev.listing.location.region}`
+                                        : ""}
+                                    {ev.listing.location.country
+                                        ? `, ${ev.listing.location.country.toUpperCase()}`
+                                        : ""}
+                                {:else}
+                                    {"Unlisted"}
+                                {/if}
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class={`flex w-full flex-col gap-2 p-4`}>
+                        <p
+                            class={`font-sans text-xs font-[700] uppercase tracking-wide text-black_panther/70`}
+                        >
+                            Comments
+                        </p>
+                        {#each commentsFor(ev.id) as c (c.id)}
+                            <div
+                                class={`flex w-full flex-col gap-1 rounded-sm bg-ly1/40 p-3`}
+                            >
+                                <p
+                                    class={`font-sans text-xs font-[600] text-black_panther/70`}
+                                >
+                                    {toDate(c.published_at)}
+                                </p>
+                                <p
+                                    class={`font-sans text-sm font-[400] text-black_panther`}
+                                >
+                                    {c.comment && c.comment.content
+                                        ? c.comment.content
+                                        : ""}
+                                </p>
+                            </div>
+                        {:else}
+                            <p class={`font-sans text-sm text-cloak_grey`}>
+                                No comments yet
+                            </p>
+                        {/each}
                     </div>
                 </div>
             {/each}
         </LayoutColumnEntry>
     {/if}
 </LayoutColumn>
-
-<!--
-
-<div class="flex flex-col w-full gap-4 p-4 justify-start items-start">
-    <div class="flex flex-row pl-2 justify-start items-center">
-        <a href={`/`}>
-            <p class="font-sans font-[400] text-base text-ly0-gl">go back</p>
-        </a>
-    </div>
-
-    <button
-        class="flex flex-col w-full p-4 justify-start items-start bg-ly1"
-        onclick={() => console.log(`profile_view?.id`, profile_view?.id)}
-    >
-        {#if profile_view}
-            <p class="font-sans font-[400] text-base text-ly0-gl">profile:</p>
-            <p class="font-sans font-[400] text-base text-ly0-gl break-all">
-                {profile_view.data.nip05}
-            </p>
-        {:else}
-            <p class="font-sans font-[400] text-base text-ly0-gl">no profile</p>
-        {/if}
-    </button>
-
-    <div class="flex flex-col w-full gap-4 justify-start items-start">
-        {#if listings_view.length}
-            {#each listings_view as listing}
-                <button
-                    class="flex flex-col w-full p-4 justify-start items-start bg-ly1"
-                    onclick={() => console.log(`listing.id`, listing.id)}
-                >
-                    <p class="font-sans font-[400] text-base text-ly0-gl">
-                        listing:
-                    </p>
-                    <p
-                        class="font-sans font-[400] text-base text-ly0-gl break-all"
-                    >
-                        {listing.kind}
-                    </p>
-                    <p
-                        class="font-sans font-[400] text-base text-ly0-gl break-all"
-                    >
-                        {listing.data.d_tag}
-                    </p>
-                </button>
-
-                <ProfileListing
-                    basis={{
-                        trade,
-                        listing_event: listing,
-                    }}
-                />
-            {/each}
-        {:else}
-            <p class="font-sans font-[400] text-base text-ly0-gl">
-                no listings
-            </p>
-        {/if}
-    </div>
-</div>
--->

@@ -1,4 +1,4 @@
-import type { RadrootsListingEventMetadata, RadrootsProfileEventMetadata } from "@radroots/events-bindings";
+import type { RadrootsCommentEventMetadata, RadrootsListingEventMetadata, RadrootsProfileEventMetadata } from "@radroots/events-bindings";
 
 export type PageLoadProfileData = {
     public_key: string;
@@ -13,5 +13,8 @@ export type PageLoadProfileDataEvents =
         } | {
             profile: RadrootsProfileEventMetadata;
             listings: RadrootsListingEventMetadata[];
+            listing_comments: Record<string, RadrootsCommentEventMetadata[]>;
+            followers: number;
+            following: number;
         }
     );

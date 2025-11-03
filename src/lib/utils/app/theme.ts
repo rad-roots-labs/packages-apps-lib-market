@@ -12,8 +12,10 @@ export const init_theme = async (): Promise<void> => {
     let mode = await idb.read_global("theme_mode");
     let key = await idb.read_global("theme_key");
 
-    if (!mode) {
-        mode = get_system_theme();
+    const mode_sys = get_system_theme();
+
+    if (!mode || mode !== mode_sys) {
+        mode = mode_sys;
         await idb.save_global("theme_mode", mode);
     }
 
